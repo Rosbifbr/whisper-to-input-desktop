@@ -5,3 +5,10 @@ This is supposed to be a simple UNIX rust application to allow for faster textua
 # Instructions
 
 To compile, cargo build -r
+
+# Roadmap
+
+[ ] Usable experience
+[ ] Multiplatform capability (remove hard Linux Desktop dependencies like Arecord and hardcoded /tmp usage)
+[ ] Improve performance
+[ ] Support local models and configuration
