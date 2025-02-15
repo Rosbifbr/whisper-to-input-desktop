@@ -1,0 +1,8 @@
+[package]
+name = "whisper-to-input-desktop"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+reqwest = { version = "0.12.12", features = ["blocking", "multipart"] }
+slint = "1.9.2"
