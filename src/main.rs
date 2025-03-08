@@ -1,5 +1,6 @@
 use std::io::Write;
 use std::process::{Command, Stdio};
+use std::path::PathBuf;
 
 use reqwest::blocking::{Client, multipart};
 use which::which;
@@ -73,7 +74,7 @@ fn handle_window_state_change(window: slint::Weak<MainWindow>, state: &mut State
                 .multipart(form)
                 .send()
                 .and_then(|r| r.text())
-                .unwrap_or_else(|_| "Transcription failed".into());
+                .unwrap_or_else(|e| format!("Transcription failed: {}", e));
 
             copy_to_clipboard(&transcript);
             upgraded.set_transcript_text(transcript.into());
@@ -85,11 +86,18 @@ fn handle_window_state_change(window: slint::Weak<MainWindow>, state: &mut State
 }
 
 fn copy_to_clipboard(text: &str) {
-    let mut child = Command::new("xclip")
-        .args(&["-selection", "clipboard"])
-        .stdin(Stdio::piped())
-        .spawn()
-        .expect("Failed to spawn xclip process");
+    let clipboard_command = if which("xclip").is_ok() {
+        Command::new("xclip")
+            .args(&["-selection", "clipboard"])
+            .stdin(Stdio::piped())
+            .spawn()
+    } else {
+        Command::new("wl-copy")
+            .stdin(Stdio::piped())
+            .spawn()
+    };
+    
+    let mut child = clipboard_command.expect("Failed to spawn clipboard process");
 
     child.stdin.as_mut()
         .expect("Failed to open xclip stdin")
@@ -102,7 +110,15 @@ fn copy_to_clipboard(text: &str) {
 fn main() {
     let main_window = MainWindow::new().unwrap();
     let main_window_weak = main_window.as_weak();
-    let api_key = "replace_me".to_string();
+
+    let config_path = {
+        let home_dir = std::env::var("HOME").expect("HOME environment variable not set");
+        PathBuf::from(home_dir).join(".config").join("whisper_api_key")
+    };
+    let api_key = std::fs::read_to_string(&config_path)
+        .expect("No API key found! Write API key in ~/.config/whisper_api_key")
+        .trim()
+        .to_string();
 
     let ask_exists = which("ask").is_ok();
     main_window.set_show_refine_button(ask_exists);
