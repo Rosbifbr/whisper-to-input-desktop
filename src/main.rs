@@ -239,7 +239,7 @@ fn send_to_whisper(file_path: &str, api_key: &str) -> Result<String, String> {
             .file("file", file_path)
             .map_err(|e| format!("Failed to attach file '{}': {}", file_path, e))?
             .text("response_format", "text")
-            .text("model", "whisper-1");
+            .text("model", "gpt-4o-mini-transcribe");
 
         let response_result = client
             .post("https://api.openai.com/v1/audio/transcriptions")
