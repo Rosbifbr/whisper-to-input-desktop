@@ -1,5 +1,4 @@
 use std::io::Write;
-use std::path::PathBuf;
 use std::process::{Command, Stdio};
 use std::sync::{Arc, Mutex}; // Use Arc and Mutex for thread safety
 use std::thread;
@@ -90,7 +89,7 @@ fn handle_record_button_press(
             // Spawn arecord
             match Command::new("arecord")
                 // You might need to adjust the device (-D hw:...) depending on your system
-                .args(&[
+                .args([
                     "-f",
                     "cd",
                     "-t",
@@ -324,7 +323,7 @@ fn copy_to_clipboard(text: &str) {
         println!("Using clipboard command: {}", prog);
         let mut command = Command::new(prog);
         if prog == "xclip" {
-            command.args(&["-selection", "clipboard", "-in"]); // Use -in for piping
+            command.args(["-selection", "clipboard", "-in"]); // Use -in for piping
         }
         command.stdin(Stdio::piped());
 
@@ -389,9 +388,9 @@ fn main() {
     }
 
     // Check if 'ask' tool is available for refine button
-    let ask_exists = which("ask").is_ok();
-    main_window.set_show_refine_button(ask_exists);
-    if !ask_exists {
+    let ask_path = which("ask").ok();
+    main_window.set_show_refine_button(ask_path.is_some());
+    if ask_path.is_none() {
         println!("'ask' command not found, hiding Refine button.");
     }
 
@@ -423,6 +422,7 @@ fn main() {
     main_window.on_refine_pressed({
         let window_weak = main_window_weak.clone();
         let state_clone = state.clone(); // Clone Arc for the closure
+        let ask_path_clone = ask_path.clone();
         move || {
             // Lock the mutex briefly just to check the state
             let current_state = *state_clone.lock().expect("Mutex poisoned on refine check");
@@ -430,7 +430,7 @@ fn main() {
 
             if current_state != State::Stopped {
                 println!("Ignoring Refine press, current state: {:?}", current_state);
-                 if let Some(w) = window_weak.upgrade() {
+                 if let Some(_w) = window_weak.upgrade() {
                     // Optionally provide feedback
                     // w.set_status_text("Wait for current operation".into());
                  }
@@ -447,46 +447,88 @@ fn main() {
                     return;
                 }
 
-                // Consider running 'ask' in a background thread too if it can be slow
-                // For now, run it synchronously but show spinner
-                upgraded.set_status_text("Refining...".into());
-                upgraded.set_processing(true); // Show spinner for refine
+                if let Some(ask_executable) = &ask_path_clone {
+                    // Consider running 'ask' in a background thread too if it can be slow
+                    // For now, run it synchronously but show spinner
+                    upgraded.set_status_text("Refining...".into());
+                    upgraded.set_processing(true); // Show spinner for refine
 
-                 // Need to yield to the event loop so the UI updates before blocking on 'ask'
-                 // A small sleep or slint::Timer::single_shot might work, but better is a thread.
-                 // Let's keep it simple for now, but be aware 'ask' might block UI update briefly.
-                 // slint::Timer::single_shot(core::time::Duration::from_millis(10), move || { ... });
+                    let prompt = format!(
+                        "Rephrase what was said, in original language and tone, to be as clear as possible. This is a conversation transcript, so naturally it will include redundancies, repetitions, words out of order and bad phrasing.\n\n{}",
+                        transcript
+                    );
 
-                let prompt = format!(
-                    "Refine the following transcript, keeping the original style. Remove redundancies and clean up: {}",
-                    transcript
-                );
+                  let mut process = match Command::new(ask_executable)
+                        .stdin(Stdio::piped())
+                        .stdout(Stdio::piped()) // Capture stdout
+                        .stderr(Stdio::piped()) // Capture stderr
+                        .spawn()
+                    {
+                        Ok(process) => process,
+                        Err(e) => {
+                            eprintln!("Failed to spawn 'ask': {}", e);
+                            upgraded.set_status_text(format!("Failed to run refine: {}", e).into());
+                            upgraded.set_processing(false);
+                            return;
+                        }
+                    };
 
-                match Command::new("ask").arg(prompt).output() {
-                    Ok(output) => {
-                        if output.status.success() {
-                            let refined = String::from_utf8_lossy(&output.stdout).to_string();
-                            copy_to_clipboard(&refined);
-                            upgraded.set_transcript_text(refined.into());
-                            upgraded.set_status_text("Idle".into());
-                            println!("Refinement successful.");
-                        } else {
-                            let error_msg = String::from_utf8_lossy(&output.stderr);
-                            eprintln!("'ask' command failed: {}", error_msg);
-                            upgraded.set_status_text(format!("Refine failed: {}", error_msg.lines().next().unwrap_or("Unknown error")).into());
-                            // Don't overwrite transcript on failure
+                    // Write to stdin in a separate block to ensure it's handled correctly
+                    if let Some(mut stdin) = process.stdin.take() {
+                        if let Err(e) = stdin.write_all(prompt.as_bytes()) {
+                            eprintln!("Failed to write to 'ask' stdin: {}", e);
+                            // We can still try to get output, maybe the process gave an error message
+                        }
+                    } // stdin is dropped here, closing the pipe.
+
+                    let output_result = process.wait_with_output();
+
+                    match output_result {
+                        Ok(output) => {
+                            if output.status.success() {
+                                let refined = String::from_utf8_lossy(&output.stdout).to_string();
+                                if refined.trim().is_empty() {
+                                     let error_msg = String::from_utf8_lossy(&output.stderr);
+                                     eprintln!("'ask' command succeeded but produced empty output. Stderr: {}", error_msg);
+                                     upgraded.set_status_text("Refine failed: Empty response".into());
+                                } else {
+                                    copy_to_clipboard(&refined);
+                                    upgraded.set_transcript_text(refined.into());
+                                    upgraded.set_status_text("Idle".into());
+                                    println!("Refinement successful.");
+                                }
+                            } else {
+                                let stderr_output = String::from_utf8_lossy(&output.stderr);
+                                let status_code = output.status.code().map_or("N/A".to_string(), |c| c.to_string());
+
+                                // The full error goes to the main text area for visibility
+                                upgraded.set_transcript_text(stderr_output.to_string().into());
+
+                                // A summary goes to the status line
+                                let summary_line = stderr_output.lines().next().unwrap_or("No stderr output");
+                                let status_msg = format!(
+                                    "Refine failed (code {}): {}",
+                                    status_code,
+                                    summary_line
+                                );
+
+                                eprintln!("'ask' command failed. Status: {}. Stderr: {}", output.status, stderr_output);
+                                upgraded.set_status_text(status_msg.into());
+                            }
+                        }
+                        Err(e) => {
+                            eprintln!("Failed to wait for 'ask' process: {}", e);
+                            upgraded.set_status_text(format!("Failed to run refine: {}", e).into());
                         }
                     }
-                    Err(e) => {
-                        eprintln!("Failed to execute 'ask': {}", e);
-                        upgraded.set_status_text(format!("Failed to run refine: {}", e).into());
-                    }
+
+                    upgraded.set_processing(false); // Hide spinner after 'ask' finishes
+
+                    // Clean up 'ask' history (fire and forget)
+                    let _ = Command::new(ask_executable).arg("-c").spawn();
+                } else {
+                    upgraded.set_status_text("Error: 'ask' command not found.".into());
                 }
-
-                upgraded.set_processing(false); // Hide spinner after 'ask' finishes
-
-                // Clean up 'ask' history (fire and forget)
-                let _ = Command::new("ask").arg("-c").spawn();
             }
         }
     });
